@@ -2,6 +2,8 @@ import express from "express";
 import cors from "cors";
 import puppeteer from "puppeteer";
 import { Resend } from "resend";
+import path from "path";
+import os from "os";
 
 const app = express();
 
@@ -9,18 +11,51 @@ app.use(cors({
   origin: [
     process.env.FRONTEND_URL || "http://localhost:3000",
     /\.vercel\.app$/,
+    /\.onrender\.com$/,
   ],
   credentials: true,
 }));
 
 app.use(express.json({ limit: "10mb" }));
 
-// ── Health check ──────────────────────────────────────────────────────────────
+// ── Helper: launch browser ────────────────────────────────────────────────────
+async function launchBrowser() {
+  // On Render, puppeteer downloads Chrome to a known cache path.
+  // We resolve it the same way puppeteer does internally.
+  const cacheDir =
+    process.env.PUPPETEER_CACHE_DIR ||
+    path.join(os.homedir(), ".cache", "puppeteer");
+
+  return puppeteer.launch({
+    headless: true,
+    // Let puppeteer find Chrome automatically from its cache
+    executablePath: puppeteer.executablePath(),
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--single-process",          // important for Render's container
+      "--no-zygote",               // important for Render's container
+    ],
+  });
+}
+
+
+// ── server Health check ──────────────────────────────────────────────────────────────
+
+
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    chromePath: puppeteer.executablePath(),
+  });
 });
 
 // ── PDF Generation ────────────────────────────────────────────────────────────
+
+
 app.post("/generate-pdf", async (req, res) => {
   let browser = null;
   try {
@@ -30,16 +65,7 @@ app.post("/generate-pdf", async (req, res) => {
       return res.status(400).json({ error: "html is required" });
     }
 
-    browser = await puppeteer.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-      ],
-    });
-
+    browser = await launchBrowser();
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: "networkidle0" });
     await page.emulateMediaType("print");
@@ -63,9 +89,12 @@ app.post("/generate-pdf", async (req, res) => {
   } catch (err) {
     if (browser) await browser.close().catch(() => {});
     console.error("PDF error:", err);
-    res.status(500).json({ error: "Failed to generate PDF" });
+    res.status(500).json({ error: String(err) });
   }
 });
+
+
+
 
 // ── Send Email ────────────────────────────────────────────────────────────────
 app.post("/send-email", async (req, res) => {
@@ -77,17 +106,7 @@ app.post("/send-email", async (req, res) => {
       return res.status(400).json({ error: "html and client email are required" });
     }
 
-    // Generate PDF
-    browser = await puppeteer.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-      ],
-    });
-
+    browser = await launchBrowser();
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: "networkidle0" });
     const pdfBytes = await page.pdf({ format: "A4", printBackground: true });
@@ -95,8 +114,6 @@ app.post("/send-email", async (req, res) => {
     browser = null;
 
     const pdfBuffer = Buffer.from(pdfBytes);
-
-    // Initialize Resend at runtime so it always reads the env var
     const resend = new Resend(process.env.RESEND_API_KEY);
 
     const { error } = await resend.emails.send({
@@ -113,12 +130,11 @@ app.post("/send-email", async (req, res) => {
     });
 
     if (error) throw new Error(error.message);
-
     res.json({ success: true });
   } catch (err) {
     if (browser) await browser.close().catch(() => {});
     console.error("Email error:", err);
-    res.status(500).json({ error: "Failed to send email" });
+    res.status(500).json({ error: String(err) });
   }
 });
 
@@ -151,8 +167,8 @@ function buildEmailHTML(
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-  console.log(`Invoicely API running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Invoiceflow API running on port ${PORT}`);
+  console.log(`Chrome path: ${puppeteer.executablePath()}`);
 });
 
 export default app;
