@@ -18,25 +18,36 @@ app.use(cors({
 app.use(express.json({ limit: "10mb" }));
 
 function getChromePath(): string {
-  const cacheDir = process.env.PUPPETEER_CACHE_DIR || "/opt/render/.cache/puppeteer";
+  // Priority 1: explicit env var set in Render dashboard
+  if (process.env.CHROME_EXECUTABLE_PATH && fs.existsSync(process.env.CHROME_EXECUTABLE_PATH)) {
+    return process.env.CHROME_EXECUTABLE_PATH;
+  }
 
-  if (fs.existsSync(cacheDir)) {
-    const versions = fs.readdirSync(cacheDir);
-    for (const version of versions) {
-      const candidates = [
-        `${cacheDir}/${version}/chrome-linux64/chrome`,
-        `${cacheDir}/${version}/chrome-linux/chrome`,
-      ];
-      for (const c of candidates) {
-        if (fs.existsSync(c)) {
-          try { execSync(`chmod +x "${c}"`); } catch {}
-          return c;
+  // Priority 2: walk the cache directory including the extra chrome/ subfolder
+  // Render structure: /opt/render/.cache/puppeteer/chrome/linux-X.X.X/chrome-linux64/chrome
+  const baseDirs = [
+    process.env.PUPPETEER_CACHE_DIR || "/opt/render/.cache/puppeteer",
+    "/root/.cache/puppeteer",
+    `${process.env.HOME}/.cache/puppeteer`,
+  ];
+
+  for (const base of baseDirs) {
+    for (const searchDir of [base, `${base}/chrome`]) {
+      if (!fs.existsSync(searchDir)) continue;
+      for (const version of fs.readdirSync(searchDir)) {
+        const vp = `${searchDir}/${version}`;
+        for (const c of [`${vp}/chrome-linux64/chrome`, `${vp}/chrome-linux/chrome`]) {
+          if (fs.existsSync(c)) {
+            try { execSync(`chmod +x "${c}"`); } catch {}
+            console.log("Chrome found at:", c);
+            return c;
+          }
         }
       }
     }
   }
 
-  throw new Error(`Chrome not found in ${cacheDir}`);
+  throw new Error(`Chrome not found. Set CHROME_EXECUTABLE_PATH env var in Render dashboard.`);
 }
 
 async function launchBrowser() {
@@ -154,8 +165,14 @@ function buildEmailHTML(invoice: Record<string, any>, invoiceNumber: string): st
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Invoiceflow API running on port ${PORT}`);
-  try { console.log(`Chrome: ${getChromePath()}`); }
-  catch (e) { console.warn("Chrome not found yet:", e); }
+  // Chrome check on startup — warning only, Chrome is loaded per-request
+  try {
+    const chromePath = getChromePath();
+    console.log(`✓ Chrome ready: ${chromePath}`);
+  } catch {
+    console.warn("⚠ Chrome not found at startup — will retry on first PDF request.");
+    console.warn("  This is normal if the build script runs after server starts.");
+  }
 });
 
 export default app;
