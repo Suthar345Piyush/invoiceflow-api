@@ -1,9 +1,8 @@
 import express from "express";
 import cors from "cors";
-import puppeteer from "puppeteer";
 import { Resend } from "resend";
-import path from "path";
-import os from "os";
+import { execSync } from "child_process";
+import fs from "fs";
 
 const app = express();
 
@@ -18,52 +17,59 @@ app.use(cors({
 
 app.use(express.json({ limit: "10mb" }));
 
-// ── Helper: launch browser ────────────────────────────────────────────────────
+function getChromePath(): string {
+  const cacheDir = process.env.PUPPETEER_CACHE_DIR || "/opt/render/.cache/puppeteer";
+
+  if (fs.existsSync(cacheDir)) {
+    const versions = fs.readdirSync(cacheDir);
+    for (const version of versions) {
+      const candidates = [
+        `${cacheDir}/${version}/chrome-linux64/chrome`,
+        `${cacheDir}/${version}/chrome-linux/chrome`,
+      ];
+      for (const c of candidates) {
+        if (fs.existsSync(c)) {
+          try { execSync(`chmod +x "${c}"`); } catch {}
+          return c;
+        }
+      }
+    }
+  }
+
+  throw new Error(`Chrome not found in ${cacheDir}`);
+}
+
 async function launchBrowser() {
-  // On Render, puppeteer downloads Chrome to a known cache path.
-  // We resolve it the same way puppeteer does internally.
-  const cacheDir =
-    process.env.PUPPETEER_CACHE_DIR ||
-    path.join(os.homedir(), ".cache", "puppeteer");
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const puppeteer = require("puppeteer-core");
+  const executablePath = getChromePath();
+  console.log("Launching Chrome from:", executablePath);
 
   return puppeteer.launch({
     headless: true,
-    // Let puppeteer find Chrome automatically from its cache
-    executablePath: puppeteer.executablePath(),
+    executablePath,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
-      "--single-process",          // important for Render's container
-      "--no-zygote",               // important for Render's container
+      "--single-process",
+      "--no-zygote",
     ],
   });
 }
 
-
-// ── server Health check ──────────────────────────────────────────────────────────────
-
-
 app.get("/health", (_req, res) => {
-  res.json({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    chromePath: puppeteer.executablePath(),
-  });
+  let chromePath = "unknown";
+  try { chromePath = getChromePath(); } catch (e) { chromePath = String(e); }
+  res.json({ status: "ok", chromePath });
 });
 
-// ── PDF Generation ────────────────────────────────────────────────────────────
-
-
-app.post("/generate-pdf", async (req, res) => {
-  let browser = null;
+app.post("/generate-pdf", async (req: any, res: any) => {
+  let browser: any = null;
   try {
     const { html, invoiceNumber } = req.body;
-
-    if (!html) {
-      return res.status(400).json({ error: "html is required" });
-    }
+    if (!html) return res.status(400).json({ error: "html is required" });
 
     browser = await launchBrowser();
     const page = await browser.newPage();
@@ -80,10 +86,7 @@ app.post("/generate-pdf", async (req, res) => {
     browser = null;
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="invoice-${invoiceNumber ?? "download"}.pdf"`
-    );
+    res.setHeader("Content-Disposition", `attachment; filename="invoice-${invoiceNumber ?? "download"}.pdf"`);
     res.setHeader("Cache-Control", "no-store");
     res.send(Buffer.from(pdfBytes));
   } catch (err) {
@@ -93,15 +96,10 @@ app.post("/generate-pdf", async (req, res) => {
   }
 });
 
-
-
-
-// ── Send Email ────────────────────────────────────────────────────────────────
-app.post("/send-email", async (req, res) => {
-  let browser = null;
+app.post("/send-email", async (req: any, res: any) => {
+  let browser: any = null;
   try {
     const { html, invoice, invoiceNumber } = req.body;
-
     if (!html || !invoice?.client?.email) {
       return res.status(400).json({ error: "html and client email are required" });
     }
@@ -121,12 +119,7 @@ app.post("/send-email", async (req, res) => {
       to: [invoice.client.email],
       subject: `Invoice ${invoiceNumber} from ${invoice.business?.name ?? "Invoicely"}`,
       html: buildEmailHTML(invoice, invoiceNumber),
-      attachments: [
-        {
-          filename: `invoice-${invoiceNumber}.pdf`,
-          content: pdfBuffer,
-        },
-      ],
+      attachments: [{ filename: `invoice-${invoiceNumber}.pdf`, content: pdfBuffer }],
     });
 
     if (error) throw new Error(error.message);
@@ -138,18 +131,11 @@ app.post("/send-email", async (req, res) => {
   }
 });
 
-function buildEmailHTML(
-  invoice: Record<string, any>,
-  invoiceNumber: string
-): string {
+function buildEmailHTML(invoice: Record<string, any>, invoiceNumber: string): string {
   return `
     <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;color:#1c1a17;">
-      <h2 style="font-size:20px;font-weight:600;margin-bottom:8px;">
-        Invoice from ${invoice.business?.name ?? ""}
-      </h2>
-      <p style="color:#706a60;font-size:14px;margin-bottom:24px;">
-        Hi ${invoice.client?.name ?? ""}, please find your invoice attached.
-      </p>
+      <h2 style="font-size:20px;font-weight:600;margin-bottom:8px;">Invoice from ${invoice.business?.name ?? ""}</h2>
+      <p style="color:#706a60;font-size:14px;margin-bottom:24px;">Hi ${invoice.client?.name ?? ""}, please find your invoice attached.</p>
       <div style="background:#f8f8f7;border-radius:10px;padding:20px;margin-bottom:24px;">
         <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
           <span style="color:#706a60;font-size:13px;">Invoice Number</span>
@@ -168,7 +154,8 @@ function buildEmailHTML(
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Invoiceflow API running on port ${PORT}`);
-  console.log(`Chrome path: ${puppeteer.executablePath()}`);
+  try { console.log(`Chrome: ${getChromePath()}`); }
+  catch (e) { console.warn("Chrome not found yet:", e); }
 });
 
 export default app;
