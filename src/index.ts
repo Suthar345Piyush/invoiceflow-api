@@ -18,36 +18,62 @@ app.use(cors({
 app.use(express.json({ limit: "10mb" }));
 
 function getChromePath(): string {
-  // Priority 1: explicit env var set in Render dashboard
-  if (process.env.CHROME_EXECUTABLE_PATH && fs.existsSync(process.env.CHROME_EXECUTABLE_PATH)) {
-    return process.env.CHROME_EXECUTABLE_PATH;
+  // 1. Explicit env var (set this in Render dashboard)
+  const explicit = process.env.CHROME_EXECUTABLE_PATH;
+  if (explicit) {
+    console.log("Using CHROME_EXECUTABLE_PATH:", explicit);
+    if (!fs.existsSync(explicit)) {
+      throw new Error(`CHROME_EXECUTABLE_PATH set but file not found: ${explicit}`);
+    }
+    return explicit;
   }
 
-  // Priority 2: walk the cache directory including the extra chrome/ subfolder
-  // Render structure: /opt/render/.cache/puppeteer/chrome/linux-X.X.X/chrome-linux64/chrome
-  const baseDirs = [
-    process.env.PUPPETEER_CACHE_DIR || "/opt/render/.cache/puppeteer",
-    "/root/.cache/puppeteer",
-    `${process.env.HOME}/.cache/puppeteer`,
-  ];
+  // 2. Walk every level under the cache dir to find any chrome binary
+  const cacheRoot = "/opt/render/.cache/puppeteer";
 
-  for (const base of baseDirs) {
-    for (const searchDir of [base, `${base}/chrome`]) {
-      if (!fs.existsSync(searchDir)) continue;
-      for (const version of fs.readdirSync(searchDir)) {
-        const vp = `${searchDir}/${version}`;
-        for (const c of [`${vp}/chrome-linux64/chrome`, `${vp}/chrome-linux/chrome`]) {
-          if (fs.existsSync(c)) {
-            try { execSync(`chmod +x "${c}"`); } catch {}
-            console.log("Chrome found at:", c);
-            return c;
-          }
+  function findChrome(dir: string, depth = 0): string | null {
+    if (depth > 5 || !fs.existsSync(dir)) return null;
+    try {
+      const entries = fs.readdirSync(dir);
+      // Check if chrome binary is directly in this dir
+      if (entries.includes("chrome")) {
+        const p = `${dir}/chrome`;
+        const stat = fs.statSync(p);
+        if (stat.isFile()) {
+          try { execSync(`chmod +x "${p}"`); } catch {}
+          return p;
         }
       }
-    }
+      // Recurse into subdirectories
+      for (const entry of entries) {
+        const full = `${dir}/${entry}`;
+        try {
+          if (fs.statSync(full).isDirectory()) {
+            const found = findChrome(full, depth + 1);
+            if (found) return found;
+          }
+        } catch {}
+      }
+    } catch {}
+    return null;
   }
 
-  throw new Error(`Chrome not found. Set CHROME_EXECUTABLE_PATH env var in Render dashboard.`);
+  const found = findChrome(cacheRoot);
+  if (found) {
+    console.log("Chrome found by walk:", found);
+    return found;
+  }
+
+  // 3. Debug: list what's actually in the cache
+  let debugInfo = "cache contents: ";
+  try {
+    const list = execSync(`find ${cacheRoot} -type f -name "chrome" 2>/dev/null`).toString().trim();
+    debugInfo = list || "no chrome binary found by find";
+  } catch {
+    debugInfo = `cache dir ${fs.existsSync(cacheRoot) ? "exists but empty" : "does not exist"}`;
+  }
+
+  throw new Error(`Chrome not found. ${debugInfo}. Set CHROME_EXECUTABLE_PATH in Render env vars.`);
 }
 
 async function launchBrowser() {
